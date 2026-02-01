@@ -106,7 +106,7 @@ HTML_LANDING = f"""
         <h1>💘 Valentine Generator</h1>
         <p>Who do you want to ask out?</p>
         <form action="/generate" method="post">
-            <input type="text" name="name" placeholder="Enter their name (e.g. Deepali)" required autocomplete="off">
+            <input type="text" name="name" placeholder="Enter their name (e.g. Rohit)" required autocomplete="off">
             <button type="submit">Create Link ✨</button>
         </form>
     </div>
@@ -424,7 +424,7 @@ async def generate_link(request: Request, name: str = Form(...)):
             <button class="btn btn-copy" onclick="copyLink()">📋 Copy Link</button>
             <a href="{generated_link}" class="btn btn-open">Open Link ↗️</a>
             
-            <a href="/" class="btn btn-back">Create Another</a>
+            <a href="/make-invitation" class="btn btn-back">Create Another</a>
         </div>
         
         {FOOTER_HTML}
