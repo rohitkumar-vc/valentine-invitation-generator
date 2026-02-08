@@ -1,16 +1,25 @@
-import json
 import os
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-
-app = FastAPI(name = "Valentine Generator", openapi_url=None, docs_url=None, redoc_url=None)
+from upstash_redis import Redis
+from dotenv import load_dotenv
 
 # --- Configuration ---
-JSON_DB_FILE = "invitations.json"
+# Load environment variables from .env file
+load_dotenv()
+
+app = FastAPI(name="Valentine Generator", openapi_url=None, docs_url=None, redoc_url=None)
 templates = Jinja2Templates(directory=".") 
 
-# --- COMMON FOOTER CSS & HTML ---
+# Initialize Upstash Redis
+# We use the REST version which works great over HTTP (serverless friendly)
+redis = Redis(
+    url=os.getenv("UPSTASH_REDIS_REST_URL"),
+    token=os.getenv("UPSTASH_REDIS_REST_TOKEN")
+)
+
+# --- COMMON FOOTER CSS & HTML (Unchanged) ---
 FOOTER_HTML = """
     <div class="footer">Made with ❤️ by Rohit</div>
 """
@@ -30,8 +39,7 @@ FOOTER_CSS = """
     }
 """
 
-# --- HTML Templates ---
-
+# --- HTML Templates (Unchanged) ---
 # 1. The Landing Page
 HTML_LANDING = f"""
 <!DOCTYPE html>
@@ -280,21 +288,6 @@ HTML_VALENTINE_TEMPLATE = f"""
 </html>
 """
 
-# --- Helper Functions ---
-
-def load_db():
-    if not os.path.exists(JSON_DB_FILE):
-        return {}
-    try:
-        with open(JSON_DB_FILE, "r") as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        return {}
-
-def save_db(data):
-    with open(JSON_DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
 # --- Routes ---
 
 @app.get("/make-invitation", response_class=HTMLResponse)
@@ -303,21 +296,15 @@ async def read_root():
 
 @app.post("/generate", response_class=HTMLResponse)
 async def generate_link(request: Request, name: str = Form(...)):
-    db = load_db()
-    
-    # Sequential ID Logic
-    if db:
-        try:
-            current_ids = [int(k) for k in db.keys()]
-            next_id = max(current_ids) + 1
-        except ValueError:
-            next_id = 1
-    else:
-        next_id = 1
+    # 1. ATOMICALLY increment the ID counter in Redis
+    # If key doesn't exist, Redis starts it at 1.
+    next_id = redis.incr("valentine_counter")
     
     str_id = str(next_id)
-    db[str_id] = name
-    save_db(db)
+    
+    # 2. Store the name with a prefixed key (e.g., "invite:1", "invite:2")
+    # Using a prefix like "invite:" is best practice in Redis to keep keys organized
+    redis.set(f"invite:{str_id}", name)
     
     base_url = str(request.base_url).rstrip("/")
     generated_link = f"{base_url}/ask/{str_id}"
@@ -455,8 +442,9 @@ async def generate_link(request: Request, name: str = Form(...)):
 
 @app.get("/ask/{unique_id}", response_class=HTMLResponse)
 async def ask_page(request: Request, unique_id: str):
-    db = load_db()
-    name = db.get(unique_id)
+    # Fetch the name from Redis
+    name = redis.get(f"invite:{unique_id}")
+    
     if not name:
         raise HTTPException(status_code=404, detail="Invitation not found. Please check the ID.")
     
@@ -465,8 +453,25 @@ async def ask_page(request: Request, unique_id: str):
 
 @app.get("/check-all-invitation")
 async def check_all_invitations():
-    return load_db()
+    # Helper to look at data. 
+    # Note: KEYS * is slow in production with millions of keys, but fine for small apps.
+    keys = redis.keys("invite:*")
+    results = {}
+    
+    # Iterate and fetch values
+    for key in keys:
+        # Key comes back as "invite:1", we just want "1"
+        clean_id = key.split(":")[1]
+        val = redis.get(key)
+        results[clean_id] = val
+        
+    return results
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    # Simple check to see if Redis is connected
+    try:
+        redis.ping()
+        return {"status": "ok", "database": "connected"}
+    except Exception as e:
+        return {"status": "error", "database": str(e)}
