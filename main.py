@@ -1,25 +1,29 @@
 import os
+import sys
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from upstash_redis import Redis
+from upstash_redis.asyncio import Redis  # NOTE: Using the Async client
 from dotenv import load_dotenv
 
 # --- Configuration ---
-# Load environment variables from .env file
 load_dotenv()
+
+# 1. Validation Check: Ensure credentials exist before starting
+UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL")
+UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+
+if not UPSTASH_URL or not UPSTASH_TOKEN:
+    print("❌ ERROR: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN not found in .env file.")
+    sys.exit(1)
+
+# 2. Initialize Async Redis
+redis = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
 
 app = FastAPI(name="Valentine Generator", openapi_url=None, docs_url=None, redoc_url=None)
 templates = Jinja2Templates(directory=".") 
 
-# Initialize Upstash Redis
-# We use the REST version which works great over HTTP (serverless friendly)
-redis = Redis(
-    url=os.getenv("UPSTASH_REDIS_REST_URL"),
-    token=os.getenv("UPSTASH_REDIS_REST_TOKEN")
-)
-
-# --- COMMON FOOTER CSS & HTML (Unchanged) ---
+# --- COMMON FOOTER CSS & HTML ---
 FOOTER_HTML = """
     <div class="footer">Made with ❤️ by Rohit</div>
 """
@@ -39,8 +43,7 @@ FOOTER_CSS = """
     }
 """
 
-# --- HTML Templates (Unchanged) ---
-# 1. The Landing Page
+# --- HTML TEMPLATES ---
 HTML_LANDING = f"""
 <!DOCTYPE html>
 <html lang="en">
@@ -102,11 +105,6 @@ HTML_LANDING = f"""
         button:hover {{ background: #e01e45; }}
         
         {FOOTER_CSS}
-
-        @media (max-width: 480px) {{
-            .card {{ padding: 25px 20px; }}
-            h1 {{ font-size: 24px; }}
-        }}
     </style>
 </head>
 <body>
@@ -123,7 +121,6 @@ HTML_LANDING = f"""
 </html>
 """
 
-# 2. Your Valentine HTML (The page sent to the user)
 HTML_VALENTINE_TEMPLATE = f"""
 <!DOCTYPE html>
 <html lang="en">
@@ -193,22 +190,17 @@ HTML_VALENTINE_TEMPLATE = f"""
     </style>
 </head>
 <body>
-
     <div class="container" id="mainCard">
         <div class="gif-container">
             <img src="https://media.tenor.com/dVr8gUFNKLYAAAAi/milk-and-mocha-cute.gif" alt="Cute Bears">
         </div>
-        
         <h1><span class="name-highlight">{{{{ name }}}}</span>,<br>will you be my Valentine?</h1>
-        
         <div class="btn-group">
             <button id="yesBtn">Yes 💛</button>
             <button id="noBtn">No</button>
         </div>
-        
         <p class="note">("No" seems a bit shy 😈)</p>
     </div>
-
     <div class="container hidden" id="successCard">
         <div class="gif-container">
             <img src="https://media.tenor.com/gUiu1zyxfzYAAAAi/bear-kiss-bear-kisses.gif" alt="Bear Kiss">
@@ -218,19 +210,15 @@ HTML_VALENTINE_TEMPLATE = f"""
             <p>I knew you would say yes! <br> Can't wait to see you! ❤️</p>
         </div>
     </div>
-    
     {FOOTER_HTML}
-
     <script>
         const yesBtn = document.getElementById('yesBtn');
         const noBtn = document.getElementById('noBtn');
         const mainCard = document.getElementById('mainCard');
         const successCard = document.getElementById('successCard');
-
         const isOverlap = (rect1, rect2) => {{
             return !(rect1.right < rect2.left || rect1.left > rect2.right || rect1.bottom < rect2.top || rect1.top > rect2.bottom);
         }};
-
         const moveNoButton = (e) => {{
             if(e && e.type === 'touchstart') e.preventDefault();
             noBtn.style.position = 'absolute';
@@ -256,17 +244,14 @@ HTML_VALENTINE_TEMPLATE = f"""
             noBtn.style.left = newLeft + 'px';
             noBtn.style.top = newTop + 'px';
         }};
-
         noBtn.addEventListener('mouseover', moveNoButton);
         noBtn.addEventListener('touchstart', moveNoButton);
         noBtn.addEventListener('click', moveNoButton);
-
         yesBtn.addEventListener('click', () => {{
             mainCard.classList.add('hidden');
             successCard.classList.remove('hidden');
             createHearts();
         }});
-
         function createHearts() {{
             const body = document.querySelector('body');
             for (let i = 0; i < 60; i++) {{
@@ -288,7 +273,7 @@ HTML_VALENTINE_TEMPLATE = f"""
 </html>
 """
 
-# --- Routes ---
+# --- ROUTES ---
 
 @app.get("/make-invitation", response_class=HTMLResponse)
 async def read_root():
@@ -296,20 +281,16 @@ async def read_root():
 
 @app.post("/generate", response_class=HTMLResponse)
 async def generate_link(request: Request, name: str = Form(...)):
-    # 1. ATOMICALLY increment the ID counter in Redis
-    # If key doesn't exist, Redis starts it at 1.
-    next_id = redis.incr("valentine_counter")
-    
+    # 1. Atomic INCR using await
+    next_id = await redis.incr("valentine_counter")
     str_id = str(next_id)
     
-    # 2. Store the name with a prefixed key (e.g., "invite:1", "invite:2")
-    # Using a prefix like "invite:" is best practice in Redis to keep keys organized
-    redis.set(f"invite:{str_id}", name)
+    # 2. Set value using await
+    await redis.set(f"invite:{str_id}", name)
     
     base_url = str(request.base_url).rstrip("/")
     generated_link = f"{base_url}/ask/{str_id}"
     
-    # Success Page HTML
     html_content = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -322,81 +303,33 @@ async def generate_link(request: Request, name: str = Form(...)):
             * {{ box-sizing: border-box; }}
             body {{ 
                 font-family: 'Nunito', sans-serif; 
-                display: flex; 
-                flex-direction: column; 
-                align-items: center; 
-                justify-content: center; 
-                min-height: 100vh; 
-                background: #e0ffe4; 
-                margin: 0;
-                padding: 20px;
+                display: flex; flex-direction: column; align-items: center; justify-content: center; 
+                min-height: 100vh; background: #e0ffe4; margin: 0; padding: 20px;
             }}
             .card {{ 
-                background: white; 
-                padding: 30px; 
-                border-radius: 20px; 
-                box-shadow: 0 10px 25px rgba(0,0,0,0.1); 
-                width: 100%;
-                max-width: 400px;
-                text-align: center;
-                z-index: 10;
+                background: white; padding: 30px; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); 
+                width: 100%; max-width: 400px; text-align: center; z-index: 10;
             }}
             h1 {{ color: #2ecc71; margin-top: 0; font-size: 26px; }}
-            p {{ font-size: 16px; color: #555; }}
-            
             .link-box {{
-                background: #f8f9fa;
-                border: 2px solid #e9ecef;
-                padding: 12px;
-                border-radius: 10px;
-                word-break: break-all;
-                font-family: monospace;
-                color: #333;
-                margin: 15px 0;
-                font-size: 14px;
+                background: #f8f9fa; border: 2px solid #e9ecef; padding: 12px; border-radius: 10px;
+                word-break: break-all; font-family: monospace; color: #333; margin: 15px 0; font-size: 14px;
             }}
-
             .btn {{
-                display: block;
-                width: 100%;
-                padding: 12px;
-                margin-top: 10px;
-                border-radius: 50px;
-                text-decoration: none;
-                font-weight: bold;
-                text-align: center;
-                cursor: pointer;
-                transition: 0.2s;
-                border: none;
-                font-size: 16px;
-                -webkit-tap-highlight-color: transparent;
+                display: block; width: 100%; padding: 12px; margin-top: 10px; border-radius: 50px;
+                text-decoration: none; font-weight: bold; text-align: center; cursor: pointer;
+                transition: 0.2s; border: none; font-size: 16px;
             }}
-
             .btn-copy {{ background: #2ecc71; color: white; }}
-            .btn-copy:active {{ transform: scale(0.98); }}
-
             .btn-open {{ background: #fff; border: 2px solid #2ecc71; color: #2ecc71; }}
-            
             .btn-back {{ background: #e9ecef; color: #666; margin-top: 20px; }}
-
-            /* Toast Notification */
             #toast {{
-                visibility: hidden;
-                min-width: 200px;
-                background-color: #333;
-                color: #fff;
-                text-align: center;
-                border-radius: 50px;
-                padding: 10px;
-                position: fixed;
-                z-index: 1000;
-                bottom: 50px; /* Raised slightly above footer */
-                font-size: 14px;
+                visibility: hidden; min-width: 200px; background-color: #333; color: #fff;
+                text-align: center; border-radius: 50px; padding: 10px; position: fixed; z-index: 1000;
+                bottom: 50px; font-size: 14px;
             }}
             #toast.show {{ visibility: visible; animation: fadein 0.5s, fadeout 0.5s 2.5s; }}
-            
             {FOOTER_CSS}
-
             @keyframes fadein {{ from {{bottom: 20px; opacity: 0;}} to {{bottom: 50px; opacity: 1;}} }}
             @keyframes fadeout {{ from {{bottom: 50px; opacity: 1;}} to {{bottom: 20px; opacity: 0;}} }}
         </style>
@@ -405,30 +338,19 @@ async def generate_link(request: Request, name: str = Form(...)):
         <div class="card">
             <h1>Link Ready! ✅</h1>
             <p>Share this link with <strong>{name}</strong>:</p>
-            
             <div class="link-box" id="linkText">{generated_link}</div>
-            
             <button class="btn btn-copy" onclick="copyLink()">📋 Copy Link</button>
             <a href="{generated_link}" class="btn btn-open">Open Link ↗️</a>
-            
             <a href="/make-invitation" class="btn btn-back">Create Another</a>
         </div>
-        
         {FOOTER_HTML}
-
         <div id="toast">Link copied to clipboard!</div>
-
         <script>
             function copyLink() {{
                 const linkText = document.getElementById("linkText").innerText;
-                navigator.clipboard.writeText(linkText).then(() => {{
-                    showToast();
-                }}).catch(err => {{
-                    console.error('Failed to copy: ', err);
-                    alert("Manual copy required: " + linkText);
-                }});
+                navigator.clipboard.writeText(linkText).then(() => {{ showToast(); }})
+                .catch(err => {{ alert("Manual copy required: " + linkText); }});
             }}
-
             function showToast() {{
                 const x = document.getElementById("toast");
                 x.className = "show";
@@ -442,8 +364,8 @@ async def generate_link(request: Request, name: str = Form(...)):
 
 @app.get("/ask/{unique_id}", response_class=HTMLResponse)
 async def ask_page(request: Request, unique_id: str):
-    # Fetch the name from Redis
-    name = redis.get(f"invite:{unique_id}")
+    # Retrieve using await
+    name = await redis.get(f"invite:{unique_id}")
     
     if not name:
         raise HTTPException(status_code=404, detail="Invitation not found. Please check the ID.")
@@ -453,25 +375,28 @@ async def ask_page(request: Request, unique_id: str):
 
 @app.get("/check-all-invitation")
 async def check_all_invitations():
-    # Helper to look at data. 
-    # Note: KEYS * is slow in production with millions of keys, but fine for small apps.
-    keys = redis.keys("invite:*")
-    results = {}
+    # 1. Fetch all keys matching pattern
+    keys = await redis.keys("invite:*")
     
-    # Iterate and fetch values
-    for key in keys:
-        # Key comes back as "invite:1", we just want "1"
-        clean_id = key.split(":")[1]
-        val = redis.get(key)
-        results[clean_id] = val
+    if not keys:
+        return {}
+    
+    # 2. Optimization: Use MGET to fetch all values in one network call
+    # keys are ['invite:1', 'invite:2'], we pass them directly to mget
+    values = await redis.mget(keys)
+    
+    results = {}
+    for key, value in zip(keys, values):
+        # Extract ID from "invite:123" -> "123"
+        clean_id = key.replace("invite:", "")
+        results[clean_id] = value
         
     return results
 
 @app.get("/health")
 async def health_check():
-    # Simple check to see if Redis is connected
     try:
-        redis.ping()
+        await redis.ping()
         return {"status": "ok", "database": "connected"}
     except Exception as e:
         return {"status": "error", "database": str(e)}
